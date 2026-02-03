@@ -1,38 +1,78 @@
-name: Multi-Target MinUI Build
+name: Build MinUI from Source
 
 on:
   workflow_dispatch:
     inputs:
       branch:
-        description: 'Branch to build'
+        description: 'MinUI branch to build'
         required: true
         default: 'main'
+      target:
+        description: 'Build target'
+        required: false
+        default: ''
+      clean_build:
+        description: 'Clean build'
+        type: boolean
+        default: true
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        target: [rg35xx, rgb30, miyoomini, default]
     
     steps:
+    - name: Setup Workspace
+      run: |
+        mkdir -p ${{ github.workspace }}/build
+        cd ${{ github.workspace }}/build
+        
     - name: Clone MinUI
       run: |
+        cd ${{ github.workspace }}/build
         git clone --depth 1 --branch ${{ github.event.inputs.branch }} \
           https://github.com/shauninman/MinUI.git
-          
-    - name: Build for ${{ matrix.target }}
+        
+    - name: Install Dependencies
       run: |
-        cd MinUI
-        make clean
-        if [ "${{ matrix.target }}" != "default" ]; then
-          make TARGET=${{ matrix.target }}
+        sudo apt-get update
+        sudo apt-get install -y \
+          build-essential \
+          libsdl2-dev \
+          libsdl2-image-dev \
+          libsdl2-ttf-dev \
+          libsdl2-mixer-dev
+          
+    - name: Build
+      run: |
+        cd ${{ github.workspace }}/build/MinUI
+        if [ "${{ github.event.inputs.clean_build }}" = "true" ]; then
+          make clean
+        fi
+        
+        if [ -n "${{ github.event.inputs.target }}" ]; then
+          make TARGET=${{ github.event.inputs.target }}
         else
           make
         fi
         
-    - name: Upload Artifact
+    - name: Archive Artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: minui-${{ matrix.target }}
-        path: MinUI/*.zip
+        name: minui-build-${{ github.run_id }}
+        path: |
+          ${{ github.workspace }}/build/MinUI/*.zip
+          ${{ github.workspace }}/build/MinUI/*.elf
+          ${{ github.workspace }}/build/MinUI/*.img
+        retention-days: 7
+        
+    - name: Create Release (Optional)
+      if: github.event_name == 'workflow_dispatch'
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: build-${{ github.run_id }}
+        name: "MinUI Build #${{ github.run_id }}"
+        draft: true
+        files: |
+          ${{ github.workspace }}/build/MinUI/*.zip
+          ${{ github.workspace }}/build/MinUI/*.elf
+          ${{ github.workspace }}/build/MinUI/*.img
