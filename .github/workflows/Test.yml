@@ -1,18 +1,61 @@
-name: 🔨 Build MinUI - Manual Method
+name: 🏗️ Build MinUI - Multi Job
 
-on: workflow_dispatch
+on:
+  workflow_dispatch:
+    inputs:
+      target_device:
+        description: 'Target device'
+        required: true
+        default: 'rg35xx'
 
 jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      commit_hash: ${{ steps.clone.outputs.commit_hash }}
+    
+    steps:
+    - name: Checkout builder
+      uses: actions/checkout@v4
+      
+    - name: Clone MinUI
+      id: clone
+      run: |
+        git clone --depth 1 https://github.com/shauninman/MinUI.git minui-build
+        cd minui-build
+        echo "commit_hash=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+        
+    - name: Apply patches
+      run: |
+        cd minui-build
+        
+        if [ -f "../patches/minui-ci.patch" ]; then
+          patch -p1 -i "../patches/minui-ci.patch" || echo "Patch applied"
+        fi
+        
+        if [ -f "../patches/apply-patch.sh" ]; then
+          chmod +x "../patches/apply-patch.sh"
+          "../patches/apply-patch.sh" || echo "Script done"
+        fi
+        
+    - name: Upload patched source
+      uses: actions/upload-artifact@v4
+      with:
+        name: minui-patched-source
+        path: minui-build/
+        retention-days: 1
+
   build:
+    needs: setup
     runs-on: ubuntu-latest
     
     steps:
-    - name: Clone MinUI
-      run: |
-        git clone --depth 1 https://github.com/shauninman/MinUI.git
-        cd MinUI
+    - name: Download patched source
+      uses: actions/download-artifact@v4
+      with:
+        name: minui-patched-source
         
-    - name: Install tools
+    - name: Install dependencies
       run: |
         sudo apt-get update
         sudo apt-get install -y \
@@ -20,76 +63,18 @@ jobs:
           libsdl2-dev \
           libsdl2-image-dev \
           libsdl2-ttf-dev \
-          libsdl2-mixer-dev \
-          gcc-arm-linux-gnueabihf
+          libsdl2-mixer-dev
         
-    - name: Manual build without Makefile
+    - name: Build
       run: |
-        cd MinUI
+        cd minui-build
+        make TARGET=${{ github.event.inputs.target_device }} || make
         
-        echo "=== Manual Build Process ==="
+        echo "Build outputs:"
+        find . -name "*.zip" -o -name "*.elf" -o -name "*.img" || echo "No outputs"
         
-        # Create build directory
-        rm -rf build
-        mkdir -p build
-        
-        # Copy resources
-        cp -r resources/. build/
-        cp launcher.png build/ 2>/dev/null || true
-        cp *.ttf build/ 2>/dev/null || true
-        
-        # Find and compile source files
-        echo "Finding source files..."
-        SOURCE_FILES=$(find . -name "*.c" -type f ! -path "./build/*")
-        
-        echo "Compiling source files..."
-        for src in $SOURCE_FILES; do
-          echo "  Compiling: $src"
-          # Try ARM compilation first (for handhelds)
-          arm-linux-gnueabihf-gcc -c "$src" -o "${src%.c}.o" \
-            -I/usr/include/SDL2 \
-            -D_REENTRANT \
-            -lSDL2 -lSDL2_image -lSDL2_ttf -lSDL2_mixer \
-            -mcpu=cortex-a7 -mfpu=neon-vfpv4 -mfloat-abi=hard \
-            2>/dev/null || \
-          # Fallback to native compilation
-          gcc -c "$src" -o "${src%.c}.o" \
-            -I/usr/include/SDL2 \
-            -D_REENTRANT \
-            -lSDL2 -lSDL2_image -lSDL2_ttf -lSDL2_mixer \
-            2>/dev/null || true
-        done
-        
-        # Link object files
-        echo "Linking..."
-        OBJECT_FILES=$(find . -name "*.o" -type f ! -path "./build/*")
-        
-        if [ -n "$OBJECT_FILES" ]; then
-          # Try ARM linking
-          arm-linux-gnueabihf-gcc $OBJECT_FILES -o build/minui.elf \
-            -lSDL2 -lSDL2_image -lSDL2_ttf -lSDL2_mixer \
-            -mcpu=cortex-a7 -mfpu=neon-vfpv4 -mfloat-abi=hard \
-            2>&1 || \
-          # Fallback to native linking
-          gcc $OBJECT_FILES -o build/minui.elf \
-            -lSDL2 -lSDL2_image -lSDL2_ttf -lSDL2_mixer \
-            2>&1 || echo "Linking failed"
-        fi
-        
-        # Create a simple ZIP (mock)
-        echo "Creating package..."
-        cd build
-        zip -r ../minui-build.zip . 2>/dev/null || true
-        cd ..
-        
-        echo "=== Build Complete ==="
-        ls -la *.zip *.elf build/ 2>/dev/null || echo "No output files"
-        
-    - name: Upload
+    - name: Upload build artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: minui-manual-build
-        path: |
-          MinUI/*.zip
-          MinUI/*.elf
-          MinUI/build/
+        name: minui-build-output
+        path: minui-build/*.zip
