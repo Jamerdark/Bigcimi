@@ -1,0 +1,73 @@
+diff --git a/makefile b/makefile
+index abc1234..def5678 100644
+--- a/makefile
++++ b/makefile
+@@ -1,4 +1,8 @@
+-# MinUI makefile
++# MinUI makefile - Patched for CI/CD Environment
++#
++# Patches applied:
++# 1. Disabled interactive tty checks
++# 2. Fixed find commands for GNU findutils
+ 
+ # SDL2 development headers are required
+ # on debian/ubuntu: sudo apt install libsdl2-dev libsdl2-image-dev libsdl2-ttf-dev libsdl2-mixer-dev
+@@ -91,7 +95,10 @@
+ .PHONY: setup
+ 
+ setup:
+-	tty -s
++	# Disabled for CI environment
++	# tty -s
++	@echo "CI Mode: Skipping tty check"
++	
+ 	@mkdir -p $(BUILD)
+ 	@cp -r resources/. $(BUILD)/
+ 	@cp launcher.png $(BUILD)/
+@@ -120,8 +127,8 @@
+ 		mv *.ttf $(BUILD)/; \
+ 	fi
+ 	@echo "optimizing and compressing images..."
+-	@find -E resources -iregex ".*\.(png|jpg|jpeg)" -exec mogrify -strip {} \;
+-	@find -E resources -iregex ".*\.(png)" -exec pngquant --force --ext .png {} \;
++	@find resources -regextype posix-egrep -iregex ".*\.(png|jpg|jpeg)" -exec mogrify -strip {} \;
++	@find resources -regextype posix-egrep -iregex ".*\.(png)" -exec pngquant --force --ext .png {} \;
+ 	@echo "done"
+ 
+ clean:
+@@ -147,20 +154,16 @@
+ 
+ select-target:
+ 	@echo "Select target platform:"
+-	@select target in $(TARGETS); do \
+-		case "$$target" in \
+-			"rg35xx") \
+-				make rg35xx;; \
+-			"rgb30") \
+-				make rgb30;; \
+-			"miyoomini") \
+-				make miyoomini;; \
+-			"trimuismart") \
+-				make trimuismart;; \
+-			"m17") \
+-				make m17;; \
+-		esac; \
+-		break; \
+-	done
++	@echo "CI Mode: Auto-selecting first target"
++	@# Auto-select for CI - default to rg35xx
++	@if [ -n "$$CI" ]; then \
++		echo "CI detected, building rg35xx"; \
++		make rg35xx; \
++	else \
++		echo "Interactive mode disabled in CI"; \
++		echo "Building default target"; \
++		make; \
++	fi
+ 
+ .PHONY: select-target
++
++# CI Build Helper Target
++.PHONY: ci-build
++ci-build: setup build
++	@echo "CI build completed successfully!"
