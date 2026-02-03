@@ -1,0 +1,191 @@
+name: 🚀 Build MinUI - No Docker
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'Target device'
+        required: true
+        default: 'rg35xx'
+        type: choice
+        options:
+        - rg35xx
+        - rgb30
+        - miyoomini
+        - default
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+    # Step 1: Checkout repository
+    - name: 📦 Checkout repository
+      uses: actions/checkout@v4
+      
+    # Step 2: Clone MinUI
+    - name: 🔄 Clone MinUI
+      run: |
+        git clone --depth 1 https://github.com/shauninman/MinUI.git minui
+        cd minui
+        echo "MinUI commit: $(git rev-parse --short HEAD)"
+        
+    # Step 3: Apply comprehensive patches
+    - name: 🔧 Apply patches for CI
+      run: |
+        cd minui
+        
+        echo "=== Patching Makefile for GitHub Actions ==="
+        
+        # Backup original
+        cp makefile makefile.original
+        
+        # 1. Disable tty check
+        sed -i 's/tty -s/# tty -s  # Disabled for CI/g' makefile
+        
+        # 2. Fix find commands
+        sed -i 's/find -E /find /g' makefile
+        sed -i 's/-iregex/-regextype posix-egrep -iregex/g' makefile
+        
+        # 3. DISABLE DOCKER BUILDS - CRITICAL!
+        echo "Disabling Docker builds..."
+        
+        # Replace Docker-based build targets with regular builds
+        sed -i 's/docker run -it --rm/echo "Docker disabled for CI" \&\& /g' makefile
+        sed -i 's/docker run -it/echo "Docker disabled" \&\& /g' makefile
+        
+        # Replace miyoomini target to not use Docker
+        cat >> makefile << 'EOF'
+
+# Override miyoomini target for CI
+miyoomini-ci:
+	@echo "Building miyoomini without Docker (CI mode)"
+	$(MAKE) TARGET=miyoomini USE_DOCKER=no
+
+# Override rgb30 target for CI  
+rgb30-ci:
+	@echo "Building rgb30 without Docker (CI mode)"
+	$(MAKE) TARGET=rgb30 USE_DOCKER=no
+
+# Set USE_DOCKER=no for CI
+ifdef CI
+USE_DOCKER = no
+endif
+
+EOF
+        
+        # 4. Patch toolchain makefile jika ada
+        if [ -f "makefile.toolchain" ]; then
+          echo "Patching makefile.toolchain..."
+          sed -i 's/docker run -it --rm/echo "Docker disabled" \&\& /g' makefile.toolchain
+          sed -i 's/-it//g' makefile.toolchain
+        fi
+        
+        echo "✅ Patches applied"
+        echo "Modified lines:"
+        grep -n "tty\|docker\|DOCKER\|CI" makefile | head -10
+        
+    # Step 4: Install ALL dependencies (termasuk cross-compilers)
+    - name: 📥 Install comprehensive dependencies
+      run: |
+        echo "Installing ALL build dependencies..."
+        sudo apt-get update
+        
+        # Basic build tools
+        sudo apt-get install -y \
+          build-essential \
+          git \
+          make \
+          cmake \
+          pkg-config \
+          wget \
+          curl \
+          unzip \
+          zip
+        
+        # SDL2 libraries
+        sudo apt-get install -y \
+          libsdl2-dev \
+          libsdl2-image-dev \
+          libsdl2-ttf-dev \
+          libsdl2-mixer-dev
+        
+        # Image tools
+        sudo apt-get install -y \
+          imagemagick \
+          pngquant \
+          optipng
+        
+        # Cross-compilation tools (untuk handheld devices)
+        echo "Installing cross-compilers..."
+        sudo apt-get install -y \
+          gcc-arm-linux-gnueabihf \
+          g++-arm-linux-gnueabihf \
+          binutils-arm-linux-gnueabihf
+        
+        # Install patch tool
+        sudo apt-get install -y patch
+        
+        echo "✅ All dependencies installed"
+        
+    # Step 5: Build without Docker
+    - name: 🔨 Build MinUI (No Docker)
+      env:
+        CI: "true"
+        USE_DOCKER: "no"
+        DEBIAN_FRONTEND: "noninteractive"
+      run: |
+        cd minui
+        
+        echo "=== Building MinUI ==="
+        echo "Target: ${{ github.event.inputs.target }}"
+        echo "CI mode: $CI"
+        echo "Use Docker: $USE_DOCKER"
+        
+        # Clean first
+        make clean 2>/dev/null || echo "Clean may have failed"
+        
+        # Build based on target
+        TARGET="${{ github.event.inputs.target }}"
+        
+        case $TARGET in
+          "miyoomini")
+            echo "Building miyoomini without Docker..."
+            # Try to build without Docker
+            make TARGET=miyoomini USE_DOCKER=no || make TARGET=miyoomini || make
+            ;;
+          "rgb30")
+            echo "Building rgb30 without Docker..."
+            make TARGET=rgb30 USE_DOCKER=no || make TARGET=rgb30 || make
+            ;;
+          "rg35xx")
+            echo "Building rg35xx..."
+            make TARGET=rg35xx || make
+            ;;
+          *)
+            echo "Building default..."
+            make
+            ;;
+        esac
+        
+        # Check results
+        echo "=== Build Results ==="
+        echo "Files in current directory:"
+        ls -la *.zip *.elf *.img *.bin 2>/dev/null || echo "No output files"
+        
+        echo "Files in build directory:"
+        ls -la build/ 2>/dev/null || echo "No build directory"
+        
+    # Step 6: Upload artifacts
+    - name: 📤 Upload build artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: minui-${{ github.event.inputs.target }}-${{ github.run_number }}
+        path: |
+          minui/*.zip
+          minui/*.elf
+          minui/*.img
+          minui/*.bin
+          minui/build/
+        if-no-files-found: warn
+        retention-days: 7
