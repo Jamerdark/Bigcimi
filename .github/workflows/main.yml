@@ -1,78 +1,203 @@
-name: Build MinUI from Source
+name: 🏗️ Build MinUI with CI Patches
 
 on:
   workflow_dispatch:
     inputs:
-      branch:
-        description: 'MinUI branch to build'
+      target_device:
+        description: 'Target device/platform'
         required: true
-        default: 'main'
-      target:
-        description: 'Build target'
+        default: 'rg35xx'
+        type: choice
+        options:
+        - rg35xx
+        - rgb30
+        - miyoomini
+        - default
+      clean_build:
+        description: 'Clean build directory'
+        required: true
+        default: true
+        type: boolean
+      create_release:
+        description: 'Create GitHub Release'
+        required: true
+        default: false
+        type: boolean
+      release_tag:
+        description: 'Release tag name'
         required: false
         default: ''
-      clean_build:
-        description: 'Clean build'
-        type: boolean
-        default: true
+
+  # Auto build on push to main
+  push:
+    branches: [main, master]
+    paths:
+      - '.github/workflows/**'
+      - 'scripts/**'
+      - '.github/patches/**'
+
+  # Schedule daily build
+  schedule:
+    - cron: '0 2 * * *'  # 2 AM UTC daily
+
+env:
+  MINUI_REPO: "https://github.com/shauninman/MinUI.git"
+  BUILD_DIR: "minui-build"
+  OUTPUT_DIR: "artifacts"
 
 jobs:
-  build:
+  setup-and-patch:
+    name: "⚙️ Setup & Patch"
     runs-on: ubuntu-latest
+    outputs:
+      build_version: ${{ steps.version.outputs.version }}
+      commit_hash: ${{ steps.clone.outputs.commit_hash }}
     
     steps:
-    - name: Setup Workspace
-      run: |
-        mkdir -p ${{ github.workspace }}/build
-        cd ${{ github.workspace }}/build
+    - name: "📦 Checkout builder repository"
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
         
-    - name: Clone MinUI
+    - name: "🔄 Clone MinUI repository"
+      id: clone
       run: |
-        cd ${{ github.workspace }}/build
-        git clone --depth 1 --branch ${{ github.event.inputs.branch }} \
-          https://github.com/shauninman/MinUI.git
+        echo "Cloning MinUI from $MINUI_REPO"
+        rm -rf $BUILD_DIR
+        git clone --depth 1 $MINUI_REPO $BUILD_DIR
         
-    - name: Install Dependencies
+        # Get commit hash
+        cd $BUILD_DIR
+        COMMIT_HASH=$(git rev-parse --short HEAD)
+        echo "commit_hash=$COMMIT_HASH" >> $GITHUB_OUTPUT
+        echo "📌 MinUI commit: $COMMIT_HASH"
+        
+    - name: "🔧 Apply CI patches"
       run: |
-        sudo apt-get update
-        sudo apt-get install -y \
-          build-essential \
-          libsdl2-dev \
-          libsdl2-image-dev \
-          libsdl2-ttf-dev \
-          libsdl2-mixer-dev
-          
-    - name: Build
-      run: |
-        cd ${{ github.workspace }}/build/MinUI
-        if [ "${{ github.event.inputs.clean_build }}" = "true" ]; then
-          make clean
+        echo "Applying patches to MinUI Makefile..."
+        cd $BUILD_DIR
+        
+        # Apply patch file if exists
+        if [ -f "../.github/patches/minui-ci.patch" ]; then
+          echo "📋 Applying patch file..."
+          patch -p1 -i "../.github/patches/minui-ci.patch" || echo "⚠️ Patch may have been already applied"
         fi
         
-        if [ -n "${{ github.event.inputs.target }}" ]; then
-          make TARGET=${{ github.event.inputs.target }}
-        else
-          make
-        fi
+        # Run patch script
+        chmod +x "../.github/patches/apply-patch.sh"
+        "../.github/patches/apply-patch.sh" || echo "ℹ️ Patch script completed"
         
-    - name: Archive Artifacts
+        # Verify patches
+        echo "✅ Patch verification:"
+        grep -n "tty\|CI\|find" makefile | head -10
+        
+    - name: "📝 Generate build version"
+      id: version
+      run: |
+        cd $BUILD_DIR
+        DATE=$(date +%Y%m%d)
+        COMMIT_SHORT=$(git rev-parse --short HEAD)
+        VERSION="MinUI-$DATE-$COMMIT_SHORT"
+        echo "version=$VERSION" >> $GITHUB_OUTPUT
+        echo "🏷️ Build version: $VERSION"
+
+  build:
+    name: "🔨 Build MinUI"
+    runs-on: ubuntu-latest
+    needs: setup-and-patch
+    strategy:
+      matrix:
+        python_version: ['3.9']
+    
+    steps:
+    - name: "📦 Checkout builder"
+      uses: actions/checkout@v4
+      
+    - name: "📂 Load patched source"
+      uses: actions/cache@v3
+      with:
+        path: ${{ env.BUILD_DIR }}
+        key: ${{ runner.os }}-minui-${{ needs.setup-and-patch.outputs.commit_hash }}-patched
+        
+    - name: "📥 Install dependencies"
+      run: |
+        chmod +x ./scripts/install-deps.sh
+        ./scripts/install-deps.sh
+        
+    - name: "🐍 Setup Python"
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python_version }}
+        
+    - name: "🏗️ Build MinUI"
+      env:
+        TARGET: ${{ github.event.inputs.target_device }}
+        CLEAN_BUILD: ${{ github.event.inputs.clean_build }}
+        BUILD_VERSION: ${{ needs.setup-and-patch.outputs.build_version }}
+      run: |
+        chmod +x ./scripts/build.sh
+        ./scripts/build.sh
+        
+        # Create artifacts directory
+        mkdir -p $OUTPUT_DIR
+        cp $BUILD_DIR/*.zip $BUILD_DIR/*.elf $BUILD_DIR/*.img $OUTPUT_DIR/ 2>/dev/null || true
+        
+        echo "📁 Build outputs:"
+        ls -la $OUTPUT_DIR/ || echo "No output files found"
+        
+    - name: "📦 Package artifacts"
+      run: |
+        chmod +x ./scripts/package-release.sh
+        ./scripts/package-release.sh "${{ needs.setup-and-patch.outputs.build_version }}"
+        
+    - name: "💾 Upload build artifacts"
       uses: actions/upload-artifact@v4
       with:
-        name: minui-build-${{ github.run_id }}
+        name: minui-build-${{ github.run_number }}
         path: |
-          ${{ github.workspace }}/build/MinUI/*.zip
-          ${{ github.workspace }}/build/MinUI/*.elf
-          ${{ github.workspace }}/build/MinUI/*.img
-        retention-days: 7
+          ${{ env.OUTPUT_DIR }}/*
+          build.log
+        retention-days: 30
+
+  release:
+    name: "🚀 Create Release"
+    needs: build
+    if: github.event.inputs.create_release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      
+    steps:
+    - name: "📥 Download artifacts"
+      uses: actions/download-artifact@v4
+      with:
+        name: minui-build-${{ github.run_number }}
+        path: release-assets
         
-    - name: Create Release (Optional)
-      if: github.event_name == 'workflow_dispatch'
+    - name: "🏷️ Create GitHub Release"
       uses: softprops/action-gh-release@v1
       with:
-        tag_name: build-${{ github.run_id }}
-        name: "MinUI Build #${{ github.run_id }}"
-        draft: true
+        tag_name: ${{ github.event.inputs.release_tag || format('build-{0}', github.run_number) }}
+        name: "MinUI Build #${{ github.run_number }}"
+        body: |
+          ## MinUI CI Build
+          
+          **Build Information:**
+          - Version: ${{ needs.setup-and-patch.outputs.build_version }}
+          - Commit: ${{ needs.setup-and-patch.outputs.commit_hash }}
+          - Target: ${{ github.event.inputs.target_device }}
+          - Build Date: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          
+          **Artifacts:**
+          - MinUI firmware image
+          - Build logs
+          
+          ---
+          
+          *Automatically built by GitHub Actions*
+          
+        draft: false
+        prerelease: false
         files: |
-          ${{ github.workspace }}/build/MinUI/*.zip
-          ${{ github.workspace }}/build/MinUI/*.elf
-          ${{ github.workspace }}/build/MinUI/*.img
+          release-assets/*
+        generate_release_notes: true
