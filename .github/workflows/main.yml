@@ -78,14 +78,14 @@ jobs:
         cd $BUILD_DIR
         
         # Apply patch file if exists
-        if [ -f "../.github/patches/minui-ci.patch" ]; then
+        if [ -f "../patches/minui-ci.patch" ]; then
           echo "📋 Applying patch file..."
-          patch -p1 -i "../.github/patches/minui-ci.patch" || echo "⚠️ Patch may have been already applied"
+          patch -p1 -i "../patches/minui-ci.patch" || echo "⚠️ Patch may have been already applied"
         fi
         
         # Run patch script
-        chmod +x "../.github/patches/apply-patch.sh"
-        "../.github/patches/apply-patch.sh" || echo "ℹ️ Patch script completed"
+        chmod +x "../patches/apply-patch.sh"
+        "../patches/apply-patch.sh" || echo "ℹ️ Patch script completed"
         
         # Verify patches
         echo "✅ Patch verification:"
