@@ -1,0 +1,140 @@
+name: 🏗️ Build MinUI - Single Job
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_device:
+        description: 'Target device'
+        required: true
+        default: 'rg35xx'
+      clean_build:
+        description: 'Clean build'
+        required: true
+        default: true
+
+env:
+  MINUI_REPO: "https://github.com/shauninman/MinUI.git"
+  BUILD_DIR: "minui-build"
+  OUTPUT_DIR: "artifacts"
+
+jobs:
+  build-minui:
+    runs-on: ubuntu-latest
+    
+    steps:
+    # Step 1: Checkout repository kita
+    - name: "📦 Checkout builder repository"
+      uses: actions/checkout@v4
+      
+    # Step 2: Clone MinUI
+    - name: "🔄 Clone MinUI repository"
+      run: |
+        echo "Cloning MinUI from $MINUI_REPO"
+        rm -rf $BUILD_DIR
+        git clone --depth 1 $MINUI_REPO $BUILD_DIR
+        
+        # Get commit info
+        cd $BUILD_DIR
+        COMMIT_HASH=$(git rev-parse --short HEAD)
+        echo "MINUI_COMMIT=$COMMIT_HASH" >> $GITHUB_ENV
+        echo "BUILD_VERSION=MinUI-$(date +%Y%m%d)-$COMMIT_HASH" >> $GITHUB_ENV
+        
+    # Step 3: Apply patches
+    - name: "🔧 Apply CI patches"
+      run: |
+        echo "Applying patches..."
+        cd $BUILD_DIR
+        
+        # Apply patch file
+        if [ -f "../patches/minui-ci.patch" ]; then
+          echo "Applying patch file..."
+          patch -p1 -i "../patches/minui-ci.patch" || echo "Patch may already be applied"
+        fi
+        
+        # Run patch script if exists
+        if [ -f "../patches/apply-patch.sh" ]; then
+          echo "Running patch script..."
+          chmod +x "../patches/apply-patch.sh"
+          "../patches/apply-patch.sh" || echo "Patch script completed"
+        fi
+        
+        # Verify
+        echo "Patch verification:"
+        grep -n "tty\|find\|CI" makefile | head -5 || echo "No matches"
+        
+    # Step 4: Install dependencies
+    - name: "📥 Install build dependencies"
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          build-essential \
+          libsdl2-dev \
+          libsdl2-image-dev \
+          libsdl2-ttf-dev \
+          libsdl2-mixer-dev \
+          patch
+        
+    # Step 5: Build MinUI
+    - name: "🔨 Build MinUI"
+      env:
+        TARGET: ${{ github.event.inputs.target_device }}
+        CLEAN_BUILD: ${{ github.event.inputs.clean_build }}
+      run: |
+        cd $BUILD_DIR
+        
+        echo "Building MinUI..."
+        echo "Target: $TARGET"
+        echo "Clean build: $CLEAN_BUILD"
+        echo "Version: $BUILD_VERSION"
+        
+        # Clean if requested
+        if [ "$CLEAN_BUILD" = "true" ]; then
+          make clean || echo "Clean may have failed"
+        fi
+        
+        # Build based on target
+        if [ "$TARGET" != "default" ]; then
+          echo "Building for target: $TARGET"
+          make TARGET=$TARGET || make
+        else
+          echo "Building default target"
+          make
+        fi
+        
+        # Show outputs
+        echo "Build outputs in $BUILD_DIR:"
+        ls -la *.zip *.elf *.img *.bin 2>/dev/null || echo "No output files found"
+        
+    # Step 6: Collect artifacts
+    - name: "📦 Package artifacts"
+      run: |
+        echo "Packaging artifacts..."
+        mkdir -p $OUTPUT_DIR
+        
+        # Copy all build outputs
+        cp $BUILD_DIR/*.zip $BUILD_DIR/*.elf $BUILD_DIR/*.img $BUILD_DIR/*.bin $OUTPUT_DIR/ 2>/dev/null || true
+        
+        # Create build info
+        cat > "$OUTPUT_DIR/build-info.txt" << EOF
+MinUI Build Information
+=======================
+Build Date: $(date)
+Target Device: ${{ github.event.inputs.target_device }}
+Clean Build: ${{ github.event.inputs.clean_build }}
+MinUI Commit: ${{ env.MINUI_COMMIT }}
+Build Version: ${{ env.BUILD_VERSION }}
+CI Run ID: ${{ github.run_id }}
+EOF
+        
+        echo "Artifacts in $OUTPUT_DIR:"
+        ls -la $OUTPUT_DIR/
+        
+    # Step 7: Upload artifacts
+    - name: "📤 Upload artifacts"
+      uses: actions/upload-artifact@v4
+      with:
+        name: minui-${{ github.event.inputs.target_device }}-${{ github.run_number }}
+        path: |
+          ${{ env.OUTPUT_DIR }}/*
+        retention-days: 30
+        if-no-files-found: warn
