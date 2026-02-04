@@ -65,7 +65,7 @@ jobs:
           echo "🏷️ Release Name: $RELEASE_NAME"
           
           # Cek apakah Makefile ada
-          if [ ! -f "Makefile" ]; then
+          if [ ! -f "makefile" ]; then
             echo "❌ ERROR: Makefile tidak ditemukan di repository sumber"
             exit 1
           fi
