@@ -26,16 +26,8 @@ on:
       release_tag:
         description: 'Release tag name'
         required: false
-        default: ''
-
-  # Auto build on push to main
-  push:
-    branches: [main, master]
-    paths:
-      - '.github/workflows/**'
-      - 'scripts/**'
-      - 'patches/**'
-
+        default: false
+        
   # Schedule daily build
   schedule:
     - cron: '0 2 * * *'  # 2 AM UTC daily
