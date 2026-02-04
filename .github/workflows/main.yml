@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       source_repo:
-        description: "URL repository NextUI yang akan di-clone"
+        description: "URL repository MinUI yang akan di-clone"
         default: "https://github.com/shauninman/MinUI.git"
         required: true
       source_branch:
@@ -14,14 +14,15 @@ on:
         required: false
       release_type:
         description: "Release type untuk tag"
-        default: "patch"
+        default: "none"
         required: true
         type: choice
         options:
+          - none
           - patch
           - minor
           - major
-        # Default saja, tidak wajib jika hanya build tanpa release
+          - date  # Menambahkan opsi date-based versioning
 
 permissions:
   attestations: write
@@ -41,28 +42,28 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Clone repository NextUI
+      - name: Clone repository MinUI
         id: clone-repo
         run: |
           echo "🔍 Cloning repository: ${{ github.event.inputs.source_repo }}"
           echo "🌿 Branch: ${{ github.event.inputs.source_branch || 'main' }}"
           
-          # Clone repository NextUI
+          # Clone repository MinUI
           git clone --depth 1 --branch "${{ github.event.inputs.source_branch || 'main' }}" \
-            "${{ github.event.inputs.source_repo }}" nextui-source
+            "${{ github.event.inputs.source_repo }}" MinUI-source
           
           echo "✅ Repository berhasil di-clone"
-          cd nextui-source
+          cd MinUI-source
           
           # Simpan informasi commit
           COMMIT_HASH=$(git rev-parse --short HEAD)
           echo "COMMIT_HASH=$COMMIT_HASH" >> $GITHUB_OUTPUT
           
           # Generate release name
-          if [ -f "Makefile" ] && make -n name 2>/dev/null; then
+          if [ -f "makefile" ] && make -n name 2>/dev/null; then
             RELEASE_NAME=$(make name)
           else
-            RELEASE_NAME="NextUI-build-$(date +%Y%m%d-%H%M%S)-$COMMIT_HASH"
+            RELEASE_NAME="MinUI-build-$(date +%Y%m%d-%H%M%S)-$COMMIT_HASH"
           fi
           echo "RELEASE_NAME=$RELEASE_NAME" >> $GITHUB_OUTPUT
           
@@ -84,13 +85,97 @@ jobs:
         run: |
           echo "commit-hash=${{ steps.clone-repo.outputs.COMMIT_HASH }}" >> "$GITHUB_OUTPUT"
 
-      - name: Compute Next Tag
-        id: next-tag
+      - name: Generate Next Tag (Date-based or SemVer)
+        id: generate-tag
         if: github.event.inputs.release_type != 'none'
-        uses: docker://ghcr.io/dokku/semver-generator:latest
-        with:
-          bump: ${{ github.event.inputs.release_type }}
-          input: ${{ steps.clone-repo.outputs.LATEST_TAG }}
+        run: |
+          LATEST_TAG="${{ steps.clone-repo.outputs.LATEST_TAG }}"
+          RELEASE_TYPE="${{ github.event.inputs.release_type }}"
+          TODAY=$(date +%Y%m%d)
+          
+          echo "Latest tag: $LATEST_TAG"
+          echo "Release type: $RELEASE_TYPE"
+          
+          # Jika release_type adalah 'date' atau tag terakhir format tanggal
+          if [[ "$RELEASE_TYPE" == "date" ]] || [[ "$LATEST_TAG" =~ ^v[0-9]{8}-[0-9]+$ ]]; then
+            echo "Using date-based versioning..."
+            
+            if [[ -z "$LATEST_TAG" ]] || [[ "$LATEST_TAG" == "v0.0.0" ]]; then
+              # Tidak ada tag sebelumnya, mulai dari 1
+              NEW_TAG="v${TODAY}-1"
+              echo "No previous tag, starting with: $NEW_TAG"
+            elif [[ "$LATEST_TAG" =~ ^v([0-9]{8})-([0-9]+)$ ]]; then
+              LAST_DATE=${BASH_REMATCH[1]}
+              LAST_NUMBER=${BASH_REMATCH[2]}
+              
+              echo "Last build date: $LAST_DATE, build number: $LAST_NUMBER"
+              
+              if [[ "$LAST_DATE" == "$TODAY" ]]; then
+                # Hari yang sama, increment nomor
+                NEW_NUMBER=$((LAST_NUMBER + 1))
+                NEW_TAG="v${TODAY}-${NEW_NUMBER}"
+                echo "Same day, incrementing to: $NEW_TAG"
+              else
+                # Hari baru, mulai dari 1
+                NEW_TAG="v${TODAY}-1"
+                echo "New day, starting with: $NEW_TAG"
+              fi
+            else
+              # Format tidak sesuai, mulai dari 1 hari ini
+              NEW_TAG="v${TODAY}-1"
+              echo "Invalid format, starting with: $NEW_TAG"
+            fi
+            
+          else
+            # Gunakan SemVer dengan semver-generator untuk patch/minor/major
+            echo "Using Semantic Versioning..."
+            
+            # Default tag jika tidak ada
+            if [[ -z "$LATEST_TAG" ]]; then
+              LATEST_TAG="v0.0.0"
+            fi
+            
+            # Pastikan tag dimulai dengan 'v'
+            if [[ ! "$LATEST_TAG" =~ ^v ]]; then
+              LATEST_TAG="v$LATEST_TAG"
+            fi
+            
+            echo "Using semver-generator with input: $LATEST_TAG"
+            
+            # Simpan input ke file untuk docker
+            echo "$LATEST_TAG" > /tmp/input_version.txt
+            
+            # Run semver-generator via docker
+            NEW_TAG=$(docker run --rm \
+              -e "INPUT_BUMP=$RELEASE_TYPE" \
+              -v /tmp/input_version.txt:/tmp/input.txt \
+              ghcr.io/dokku/semver-generator:latest \
+              sh -c 'cat /tmp/input.txt | xargs -I {} echo -n {}' 2>/dev/null || echo "")
+            
+            # Fallback jika semver-generator gagal
+            if [[ -z "$NEW_TAG" ]]; then
+              echo "semver-generator failed, using manual increment..."
+              if [[ "$LATEST_TAG" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+                MAJOR=${BASH_REMATCH[1]}
+                MINOR=${BASH_REMATCH[2]}
+                PATCH=${BASH_REMATCH[3]}
+                
+                case "$RELEASE_TYPE" in
+                  "major") NEW_TAG="v$((MAJOR + 1)).0.0" ;;
+                  "minor") NEW_TAG="v$MAJOR.$((MINOR + 1)).0" ;;
+                  "patch") NEW_TAG="v$MAJOR.$MINOR.$((PATCH + 1))" ;;
+                  *) NEW_TAG="v$MAJOR.$MINOR.$PATCH" ;;
+                esac
+              else
+                NEW_TAG="v1.0.0"
+              fi
+            fi
+            
+            echo "Generated SemVer tag: $NEW_TAG"
+          fi
+          
+          echo "next-tag=$NEW_TAG" >> $GITHUB_OUTPUT
+          echo "✅ Generated tag: $NEW_TAG"
 
   core-matrix:
     needs: clone-and-prepare
@@ -103,19 +188,20 @@ jobs:
       fail-fast: true
       matrix:
         toolchain:
-          - my282
+          - tg5040
+          - tg5050
 
     steps:
-      - name: Clone repository NextUI (untuk build)
+      - name: Clone repository MinUI (untuk build)
         run: |
           git clone --depth 1 --branch "${{ github.event.inputs.source_branch || 'main' }}" \
-            "${{ github.event.inputs.source_repo }}" nextui-source
-          cd nextui-source
+            "${{ github.event.inputs.source_repo }}" MinUI-source
+          cd MinUI-source
 
       - name: Generate cores matrix
         id: cores
         run: |
-          cd nextui-source
+          cd MinUI-source
           CORES="$(make cores-json)"
           echo "cores=$CORES" >> $GITHUB_OUTPUT
 
@@ -128,30 +214,31 @@ jobs:
       fail-fast: true
       matrix:
         toolchain:
-          - my282
+          - tg5040
+          - tg5050
         core: ${{ fromJson(needs.core-matrix.outputs.cores) }}
     steps:
-      - name: Clone repository NextUI
+      - name: Clone repository MinUI
         run: |
           git clone --depth 1 --branch "${{ github.event.inputs.source_branch || 'main' }}" \
-            "${{ github.event.inputs.source_repo }}" nextui-source
-          cd nextui-source
+            "${{ github.event.inputs.source_repo }}" MinUI-source
+          cd MinUI-source
 
       - name: Setup
         run: |
-          cd nextui-source
+          cd MinUI-source
           make setup
 
       - name: Build ${{ matrix.core }} core
         run: |
-          cd nextui-source
+          cd MinUI-source
           make build-core CORE=${{ matrix.core }}
 
       - name: Upload core artifact
         uses: actions/upload-artifact@v4.6.2
         with:
           name: core-${{ matrix.toolchain }}-${{ matrix.core }}.zip
-          path: nextui-source/workspace/${{ env.PLATFORM }}/cores/output/
+          path: MinUI-source/workspace/${{ env.PLATFORM }}/cores/output/
 
   build:
     needs:
@@ -161,11 +248,11 @@ jobs:
     env:
       RELEASE_NAME: ${{ needs.clone-and-prepare.outputs.release-name }}
     steps:
-      - name: Clone repository NextUI untuk final build
+      - name: Clone repository MinUI untuk final build
         run: |
           git clone --depth 1 --branch "${{ github.event.inputs.source_branch || 'main' }}" \
-            "${{ github.event.inputs.source_repo }}" nextui-source
-          cd nextui-source
+            "${{ github.event.inputs.source_repo }}" MinUI-source
+          cd MinUI-source
 
       - name: Install dependencies
         run: |
@@ -174,19 +261,19 @@ jobs:
 
       - name: Setup build environment
         run: |
-          cd nextui-source
+          cd MinUI-source
           make setup
 
       - name: Download Cores (tg5040)
         uses: actions/download-artifact@v4.3.0
         with:
-          path: nextui-source/workspace/tg5040/cores/output/
+          path: MinUI-source/workspace/tg5040/cores/output/
           pattern: core-tg5040-*
           merge-multiple: true
 
       - name: Build untuk tg5040 platform
         run: |
-          cd nextui-source
+          cd MinUI-source
           make tg5040
         env:
           PLATFORM: tg5040
@@ -194,25 +281,25 @@ jobs:
       - name: Download Cores (tg5050)
         uses: actions/download-artifact@v4.3.0
         with:
-          path: nextui-source/workspace/tg5050/cores/output/
+          path: MinUI-source/workspace/tg5050/cores/output/
           pattern: core-tg5050-*
           merge-multiple: true
 
       - name: Build untuk tg5050 platform
         run: |
-          cd nextui-source
+          cd MinUI-source
           make tg5050
         env:
           PLATFORM: tg5050
 
       - name: Build komponen special
         run: |
-          cd nextui-source
+          cd MinUI-source
           make special
 
       - name: Package semua build
         run: |
-          cd nextui-source
+          cd MinUI-source
           make package
 
       - name: Upload hasil build ke artifacts
@@ -220,9 +307,9 @@ jobs:
         with:
           name: ${{ env.RELEASE_NAME }}-build-output
           path: |
-            nextui-source/releases/${{ env.RELEASE_NAME }}-all.zip
-            nextui-source/releases/${{ env.RELEASE_NAME }}-base.zip
-            nextui-source/releases/${{ env.RELEASE_NAME }}-extras.zip
+            MinUI-source/releases/${{ env.RELEASE_NAME }}-all.zip
+            MinUI-source/releases/${{ env.RELEASE_NAME }}-base.zip
+            MinUI-source/releases/${{ env.RELEASE_NAME }}-extras.zip
           retention-days: 30
 
       - name: Copy hasil build ke repository ini
@@ -231,14 +318,14 @@ jobs:
           mkdir -p builds/${{ env.RELEASE_NAME }}
           
           # Copy file hasil build
-          if [ -f "nextui-source/releases/${{ env.RELEASE_NAME }}-all.zip" ]; then
-            cp nextui-source/releases/${{ env.RELEASE_NAME }}-all.zip builds/${{ env.RELEASE_NAME }}/
+          if [ -f "MinUI-source/releases/${{ env.RELEASE_NAME }}-all.zip" ]; then
+            cp MinUI-source/releases/${{ env.RELEASE_NAME }}-all.zip builds/${{ env.RELEASE_NAME }}/
           fi
-          if [ -f "nextui-source/releases/${{ env.RELEASE_NAME }}-base.zip" ]; then
-            cp nextui-source/releases/${{ env.RELEASE_NAME }}-base.zip builds/${{ env.RELEASE_NAME }}/
+          if [ -f "MinUI-source/releases/${{ env.RELEASE_NAME }}-base.zip" ]; then
+            cp MinUI-source/releases/${{ env.RELEASE_NAME }}-base.zip builds/${{ env.RELEASE_NAME }}/
           fi
-          if [ -f "nextui-source/releases/${{ env.RELEASE_NAME }}-extras.zip" ]; then
-            cp nextui-source/releases/${{ env.RELEASE_NAME }}-extras.zip builds/${{ env.RELEASE_NAME }}/
+          if [ -f "MinUI-source/releases/${{ env.RELEASE_NAME }}-extras.zip" ]; then
+            cp MinUI-source/releases/${{ env.RELEASE_NAME }}-extras.zip builds/${{ env.RELEASE_NAME }}/
           fi
           
           # Buat file info build
@@ -262,9 +349,9 @@ jobs:
         uses: actions/attest-build-provenance@v2.3.0
         with:
           subject-path: |
-            nextui-source/releases/${{ env.RELEASE_NAME }}-all.zip
-            nextui-source/releases/${{ env.RELEASE_NAME }}-base.zip
-            nextui-source/releases/${{ env.RELEASE_NAME }}-extras.zip
+            MinUI-source/releases/${{ env.RELEASE_NAME }}-all.zip
+            MinUI-source/releases/${{ env.RELEASE_NAME }}-base.zip
+            MinUI-source/releases/${{ env.RELEASE_NAME }}-extras.zip
 
   release:
     needs:
@@ -282,7 +369,7 @@ jobs:
         uses: actions/download-artifact@v4.3.0
         with:
           path: releases/
-          pattern: NextUI-*
+          pattern: MinUI-*
           merge-multiple: true
 
       - name: Create and Push Tag (opsional)
@@ -305,7 +392,7 @@ jobs:
           tag_name: ${{ needs.clone-and-prepare.outputs.next-tag }}
           make_latest: "true"
           body: |
-            ## NextUI Build from External Repository
+            ## MinUI Build from External Repository
             
             **Build Information:**
             - Source Repository: ${{ github.event.inputs.source_repo }}
@@ -320,7 +407,7 @@ jobs:
             
             ---
             
-            For full features list and help on how to use NextUI:
+            For full features list and help on how to use MinUI:
             https://nextui.loveretro.games/docs/
 
             ## How to install/update
