@@ -1,203 +1,353 @@
-name: 🏗️ Build MinUI with CI Patches
+---
+name: Clone and Build MinUI
 
 on:
   workflow_dispatch:
     inputs:
-      target_device:
-        description: 'Target device/platform'
+      source_repo:
+        description: "URL repository NextUI yang akan di-clone"
+        default: "https://github.com/shauninman/MinUI.git"
         required: true
-        default: 'rg35xx'
+      source_branch:
+        description: "Branch yang akan di-clone"
+        default: "main"
+        required: false
+      release_type:
+        description: "Release type untuk tag"
+        default: "patch"
+        required: true
         type: choice
         options:
-        - rg35xx
-        - rgb30
-        - miyoomini
-        - default
-      clean_build:
-        description: 'Clean build directory'
-        required: true
-        default: true
-        type: boolean
-      create_release:
-        description: 'Create GitHub Release'
-        required: true
-        default: false
-        type: boolean
-      release_tag:
-        description: 'Release tag name'
-        required: false
-        default: ''
+          - patch
+          - minor
+          - major
+        # Default saja, tidak wajib jika hanya build tanpa release
 
-  # Auto build on push to main
-  push:
-    branches: [main, master]
-    paths:
-      - '.github/workflows/**'
-      - 'scripts/**'
-      - '.github/patches/**'
-
-  # Schedule daily build
-  schedule:
-    - cron: '0 2 * * *'  # 2 AM UTC daily
-
-env:
-  MINUI_REPO: "https://github.com/shauninman/MinUI.git"
-  BUILD_DIR: "minui-build"
-  OUTPUT_DIR: "artifacts"
+permissions:
+  attestations: write
+  contents: write
+  id-token: write
 
 jobs:
-  setup-and-patch:
-    name: "⚙️ Setup & Patch"
-    runs-on: ubuntu-latest
+  clone-and-prepare:
+    runs-on: ubuntu-24.04
     outputs:
-      build_version: ${{ steps.version.outputs.version }}
-      commit_hash: ${{ steps.clone.outputs.commit_hash }}
-    
+      next-tag: ${{ steps.next-tag.outputs.version }}
+      release-name: ${{ steps.release-name.outputs.RELEASE_NAME }}
+      commit-hash: ${{ steps.get-commit.outputs.commit-hash }}
     steps:
-    - name: "📦 Checkout builder repository"
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
-        
-    - name: "🔄 Clone MinUI repository"
-      id: clone
-      run: |
-        echo "Cloning MinUI from $MINUI_REPO"
-        rm -rf $BUILD_DIR
-        git clone --depth 1 $MINUI_REPO $BUILD_DIR
-        
-        # Get commit hash
-        cd $BUILD_DIR
-        COMMIT_HASH=$(git rev-parse --short HEAD)
-        echo "commit_hash=$COMMIT_HASH" >> $GITHUB_OUTPUT
-        echo "📌 MinUI commit: $COMMIT_HASH"
-        
-    - name: "🔧 Apply CI patches"
-      run: |
-        echo "Applying patches to MinUI Makefile..."
-        cd $BUILD_DIR
-        
-        # Apply patch file if exists
-        if [ -f "../patches/minui-ci.patch" ]; then
-          echo "📋 Applying patch file..."
-          patch -p1 -i "../patches/minui-ci.patch" || echo "⚠️ Patch may have been already applied"
-        fi
-        
-        # Run patch script
-        chmod +x "../patches/apply-patch.sh"
-        "../patches/apply-patch.sh" || echo "ℹ️ Patch script completed"
-        
-        # Verify patches
-        echo "✅ Patch verification:"
-        grep -n "tty\|CI\|find" makefile | head -10
-        
-    - name: "📝 Generate build version"
-      id: version
-      run: |
-        cd $BUILD_DIR
-        DATE=$(date +%Y%m%d)
-        COMMIT_SHORT=$(git rev-parse --short HEAD)
-        VERSION="MinUI-$DATE-$COMMIT_SHORT"
-        echo "version=$VERSION" >> $GITHUB_OUTPUT
-        echo "🏷️ Build version: $VERSION"
+      - name: Checkout repository tujuan (untuk menyimpan hasil)
+        uses: actions/checkout@v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Clone repository NextUI
+        id: clone-repo
+        run: |
+          echo "🔍 Cloning repository: ${{ github.event.inputs.source_repo }}"
+          echo "🌿 Branch: ${{ github.event.inputs.source_branch || 'main' }}"
+          
+          # Clone repository NextUI
+          git clone --depth 1 --branch "${{ github.event.inputs.source_branch || 'main' }}" \
+            "${{ github.event.inputs.source_repo }}" nextui-source
+          
+          echo "✅ Repository berhasil di-clone"
+          cd nextui-source
+          
+          # Simpan informasi commit
+          COMMIT_HASH=$(git rev-parse --short HEAD)
+          echo "COMMIT_HASH=$COMMIT_HASH" >> $GITHUB_OUTPUT
+          
+          # Generate release name
+          if [ -f "Makefile" ] && make -n name 2>/dev/null; then
+            RELEASE_NAME=$(make name)
+          else
+            RELEASE_NAME="NextUI-build-$(date +%Y%m%d-%H%M%S)-$COMMIT_HASH"
+          fi
+          echo "RELEASE_NAME=$RELEASE_NAME" >> $GITHUB_OUTPUT
+          
+          # Get latest tag dari repo sumber
+          LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+          echo "LATEST_TAG=$LATEST_TAG" >> $GITHUB_OUTPUT
+          
+          echo "🔖 Latest Tag: $LATEST_TAG"
+          echo "🏷️ Release Name: $RELEASE_NAME"
+          echo "🔗 Commit: $COMMIT_HASH"
+
+      - name: Generate Release Name
+        id: release-name
+        run: |
+          echo "RELEASE_NAME=${{ steps.clone-repo.outputs.RELEASE_NAME }}" >> "$GITHUB_OUTPUT"
+
+      - name: Get Commit Hash
+        id: get-commit
+        run: |
+          echo "commit-hash=${{ steps.clone-repo.outputs.COMMIT_HASH }}" >> "$GITHUB_OUTPUT"
+
+      - name: Compute Next Tag
+        id: next-tag
+        if: github.event.inputs.release_type != 'none'
+        uses: docker://ghcr.io/dokku/semver-generator:latest
+        with:
+          bump: ${{ github.event.inputs.release_type }}
+          input: ${{ steps.clone-repo.outputs.LATEST_TAG }}
+
+  core-matrix:
+    needs: clone-and-prepare
+    runs-on: ubuntu-24.04-arm
+    env:
+      PLATFORM: ${{ matrix.toolchain }}
+    outputs:
+      cores: ${{ steps.cores.outputs.cores }}
+    strategy:
+      fail-fast: true
+      matrix:
+        toolchain:
+          - my282
+
+    steps:
+      - name: Clone repository NextUI (untuk build)
+        run: |
+          git clone --depth 1 --branch "${{ github.event.inputs.source_branch || 'main' }}" \
+            "${{ github.event.inputs.source_repo }}" nextui-source
+          cd nextui-source
+
+      - name: Generate cores matrix
+        id: cores
+        run: |
+          cd nextui-source
+          CORES="$(make cores-json)"
+          echo "cores=$CORES" >> $GITHUB_OUTPUT
+
+  build-core:
+    needs: core-matrix
+    runs-on: ubuntu-24.04-arm
+    env:
+      PLATFORM: ${{ matrix.toolchain }}
+    strategy:
+      fail-fast: true
+      matrix:
+        toolchain:
+          - my282
+        core: ${{ fromJson(needs.core-matrix.outputs.cores) }}
+    steps:
+      - name: Clone repository NextUI
+        run: |
+          git clone --depth 1 --branch "${{ github.event.inputs.source_branch || 'main' }}" \
+            "${{ github.event.inputs.source_repo }}" nextui-source
+          cd nextui-source
+
+      - name: Setup
+        run: |
+          cd nextui-source
+          make setup
+
+      - name: Build ${{ matrix.core }} core
+        run: |
+          cd nextui-source
+          make build-core CORE=${{ matrix.core }}
+
+      - name: Upload core artifact
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: core-${{ matrix.toolchain }}-${{ matrix.core }}.zip
+          path: nextui-source/workspace/${{ env.PLATFORM }}/cores/output/
 
   build:
-    name: "🔨 Build MinUI"
-    runs-on: ubuntu-latest
-    needs: setup-and-patch
-    strategy:
-      matrix:
-        python_version: ['3.9']
-    
+    needs:
+      - clone-and-prepare
+      - build-core
+    runs-on: ubuntu-24.04-arm
+    env:
+      RELEASE_NAME: ${{ needs.clone-and-prepare.outputs.release-name }}
     steps:
-    - name: "📦 Checkout builder"
-      uses: actions/checkout@v4
-      
-    - name: "📂 Load patched source"
-      uses: actions/cache@v3
-      with:
-        path: ${{ env.BUILD_DIR }}
-        key: ${{ runner.os }}-minui-${{ needs.setup-and-patch.outputs.commit_hash }}-patched
-        
-    - name: "📥 Install dependencies"
-      run: |
-        chmod +x ./scripts/install-deps.sh
-        ./scripts/install-deps.sh
-        
-    - name: "🐍 Setup Python"
-      uses: actions/setup-python@v4
-      with:
-        python-version: ${{ matrix.python_version }}
-        
-    - name: "🏗️ Build MinUI"
-      env:
-        TARGET: ${{ github.event.inputs.target_device }}
-        CLEAN_BUILD: ${{ github.event.inputs.clean_build }}
-        BUILD_VERSION: ${{ needs.setup-and-patch.outputs.build_version }}
-      run: |
-        chmod +x ./scripts/build.sh
-        ./scripts/build.sh
-        
-        # Create artifacts directory
-        mkdir -p $OUTPUT_DIR
-        cp $BUILD_DIR/*.zip $BUILD_DIR/*.elf $BUILD_DIR/*.img $OUTPUT_DIR/ 2>/dev/null || true
-        
-        echo "📁 Build outputs:"
-        ls -la $OUTPUT_DIR/ || echo "No output files found"
-        
-    - name: "📦 Package artifacts"
-      run: |
-        chmod +x ./scripts/package-release.sh
-        ./scripts/package-release.sh "${{ needs.setup-and-patch.outputs.build_version }}"
-        
-    - name: "💾 Upload build artifacts"
-      uses: actions/upload-artifact@v4
-      with:
-        name: minui-build-${{ github.run_number }}
-        path: |
-          ${{ env.OUTPUT_DIR }}/*
-          build.log
-        retention-days: 30
+      - name: Clone repository NextUI untuk final build
+        run: |
+          git clone --depth 1 --branch "${{ github.event.inputs.source_branch || 'main' }}" \
+            "${{ github.event.inputs.source_repo }}" nextui-source
+          cd nextui-source
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zipmerge
+
+      - name: Setup build environment
+        run: |
+          cd nextui-source
+          make setup
+
+      - name: Download Cores (tg5040)
+        uses: actions/download-artifact@v4.3.0
+        with:
+          path: nextui-source/workspace/tg5040/cores/output/
+          pattern: core-tg5040-*
+          merge-multiple: true
+
+      - name: Build untuk tg5040 platform
+        run: |
+          cd nextui-source
+          make tg5040
+        env:
+          PLATFORM: tg5040
+
+      - name: Download Cores (tg5050)
+        uses: actions/download-artifact@v4.3.0
+        with:
+          path: nextui-source/workspace/tg5050/cores/output/
+          pattern: core-tg5050-*
+          merge-multiple: true
+
+      - name: Build untuk tg5050 platform
+        run: |
+          cd nextui-source
+          make tg5050
+        env:
+          PLATFORM: tg5050
+
+      - name: Build komponen special
+        run: |
+          cd nextui-source
+          make special
+
+      - name: Package semua build
+        run: |
+          cd nextui-source
+          make package
+
+      - name: Upload hasil build ke artifacts
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: ${{ env.RELEASE_NAME }}-build-output
+          path: |
+            nextui-source/releases/${{ env.RELEASE_NAME }}-all.zip
+            nextui-source/releases/${{ env.RELEASE_NAME }}-base.zip
+            nextui-source/releases/${{ env.RELEASE_NAME }}-extras.zip
+          retention-days: 30
+
+      - name: Copy hasil build ke repository ini
+        run: |
+          # Buat folder untuk menyimpan build di repo ini
+          mkdir -p builds/${{ env.RELEASE_NAME }}
+          
+          # Copy file hasil build
+          if [ -f "nextui-source/releases/${{ env.RELEASE_NAME }}-all.zip" ]; then
+            cp nextui-source/releases/${{ env.RELEASE_NAME }}-all.zip builds/${{ env.RELEASE_NAME }}/
+          fi
+          if [ -f "nextui-source/releases/${{ env.RELEASE_NAME }}-base.zip" ]; then
+            cp nextui-source/releases/${{ env.RELEASE_NAME }}-base.zip builds/${{ env.RELEASE_NAME }}/
+          fi
+          if [ -f "nextui-source/releases/${{ env.RELEASE_NAME }}-extras.zip" ]; then
+            cp nextui-source/releases/${{ env.RELEASE_NAME }}-extras.zip builds/${{ env.RELEASE_NAME }}/
+          fi
+          
+          # Buat file info build
+          cat > builds/${{ env.RELEASE_NAME }}/build-info.txt << EOF
+          Build Information
+          =================
+          Build Name: ${{ env.RELEASE_NAME }}
+          Source Repo: ${{ github.event.inputs.source_repo }}
+          Source Branch: ${{ github.event.inputs.source_branch || 'main' }}
+          Commit Hash: ${{ needs.clone-and-prepare.outputs.commit-hash }}
+          Build Date: $(date)
+          Release Type: ${{ github.event.inputs.release_type }}
+          =================
+          EOF
+          
+          # Tampilkan struktur file
+          echo "📁 Build files saved to builds/${{ env.RELEASE_NAME }}/:"
+          ls -la builds/${{ env.RELEASE_NAME }}/
+
+      - name: Attest Build Provenance
+        uses: actions/attest-build-provenance@v2.3.0
+        with:
+          subject-path: |
+            nextui-source/releases/${{ env.RELEASE_NAME }}-all.zip
+            nextui-source/releases/${{ env.RELEASE_NAME }}-base.zip
+            nextui-source/releases/${{ env.RELEASE_NAME }}-extras.zip
 
   release:
-    name: "🚀 Create Release"
-    needs: build
-    if: github.event.inputs.create_release == 'true'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      
+    needs:
+      - build
+      - clone-and-prepare
+    if: github.event.inputs.release_type != 'none'
+    runs-on: ubuntu-24.04-arm
     steps:
-    - name: "📥 Download artifacts"
-      uses: actions/download-artifact@v4
-      with:
-        name: minui-build-${{ github.run_number }}
-        path: release-assets
-        
-    - name: "🏷️ Create GitHub Release"
-      uses: softprops/action-gh-release@v1
-      with:
-        tag_name: ${{ github.event.inputs.release_tag || format('build-{0}', github.run_number) }}
-        name: "MinUI Build #${{ github.run_number }}"
-        body: |
-          ## MinUI CI Build
-          
-          **Build Information:**
-          - Version: ${{ needs.setup-and-patch.outputs.build_version }}
-          - Commit: ${{ needs.setup-and-patch.outputs.commit_hash }}
-          - Target: ${{ github.event.inputs.target_device }}
-          - Build Date: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
-          
-          **Artifacts:**
-          - MinUI firmware image
-          - Build logs
-          
-          ---
-          
-          *Automatically built by GitHub Actions*
-          
-        draft: false
-        prerelease: false
-        files: |
-          release-assets/*
-        generate_release_notes: true
+      - name: Checkout repository ini
+        uses: actions/checkout@v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Download Build Artifacts
+        uses: actions/download-artifact@v4.3.0
+        with:
+          path: releases/
+          pattern: NextUI-*
+          merge-multiple: true
+
+      - name: Create and Push Tag (opsional)
+        if: github.event.inputs.release_type != 'none'
+        run: |
+          git config --global user.email "action@github.com"
+          git config --global user.name "GitHub Action"
+          git tag "$GIT_NEXT_TAG"
+          git push origin "$GIT_NEXT_TAG"
+        env:
+          GIT_NEXT_TAG: ${{ needs.clone-and-prepare.outputs.next-tag }}
+
+      - name: Create GitHub Release
+        if: github.event.inputs.release_type != 'none'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: releases/*
+          generate_release_notes: true
+          append_body: true
+          tag_name: ${{ needs.clone-and-prepare.outputs.next-tag }}
+          make_latest: "true"
+          body: |
+            ## NextUI Build from External Repository
+            
+            **Build Information:**
+            - Source Repository: ${{ github.event.inputs.source_repo }}
+            - Source Branch: ${{ github.event.inputs.source_branch || 'main' }}
+            - Commit Hash: ${{ needs.clone-and-prepare.outputs.commit-hash }}
+            - Build Date: $(date)
+            
+            **Generated Artifacts:**
+            1. ${{ needs.clone-and-prepare.outputs.release-name }}-all.zip
+            2. ${{ needs.clone-and-prepare.outputs.release-name }}-base.zip
+            3. ${{ needs.clone-and-prepare.outputs.release-name }}-extras.zip
+            
+            ---
+            
+            For full features list and help on how to use NextUI:
+            https://nextui.loveretro.games/docs/
+
+            ## How to install/update
+            For a fresh installation: https://nextui.loveretro.games/getting-started/installation/
+            When updating from a previous release: https://nextui.loveretro.games/getting-started/updating/
+
+      - name: Display Build Summary
+        run: |
+          echo ""
+          echo "========================================"
+          echo "✅ BUILD COMPLETED SUCCESSFULLY"
+          echo "========================================"
+          echo "📦 Build Name: ${{ needs.clone-and-prepare.outputs.release-name }}"
+          echo "🔗 Source Repo: ${{ github.event.inputs.source_repo }}"
+          echo "🌿 Source Branch: ${{ github.event.inputs.source_branch || 'main' }}"
+          echo "🔖 Commit Hash: ${{ needs.clone-and-prepare.outputs.commit-hash }}"
+          echo "🏷️  Next Tag: ${{ needs.clone-and-prepare.outputs.next-tag || 'No tag generated' }}"
+          echo "📁 Build saved to: builds/${{ needs.clone-and-prepare.outputs.release-name }}/"
+          echo ""
+          echo "📦 Generated files:"
+          echo "  - ${{ needs.clone-and-prepare.outputs.release-name }}-all.zip"
+          echo "  - ${{ needs.clone-and-prepare.outputs.release-name }}-base.zip"
+          echo "  - ${{ needs.clone-and-prepare.outputs.release-name }}-extras.zip"
+          echo ""
+          echo "💾 Download from:"
+          echo "  - GitHub Actions → Artifacts → ${{ needs.clone-and-prepare.outputs.release-name }}-build-output"
+          if [ "${{ github.event.inputs.release_type }}" != "none" ]; then
+            echo "  - GitHub Releases → ${{ needs.clone-and-prepare.outputs.next-tag }}"
+          fi
+          echo "========================================"
