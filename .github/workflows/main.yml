@@ -201,7 +201,7 @@ jobs:
       - name: Generate cores matrix
         id: cores
         run: |
-          cd nextui-source
+          cd MinUI-source
           # Cek apakah ini MinUI repository
           if [[ "${{ github.event.inputs.source_repo }}" == *"MinUI"* ]] || [ ! -f "makefile" ]; then
             echo "⚠️ MinUI detected or no Makefile, using default cores"
