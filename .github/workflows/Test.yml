@@ -1,80 +1,124 @@
-name: 🏗️ Build MinUI - Multi Job
+---
+name: Clone and Build External Repo
 
 on:
-  workflow_dispatch:
+  workflow_dispatch:  # Manual trigger
     inputs:
-      target_device:
-        description: 'Target device'
+      source_repo:
+        description: 'URL repository sumber yang akan di-clone dan build'
         required: true
-        default: 'rg35xx'
+        default: 'https://github.com/LoveRetro/NextUI.git'  # ⭐ INI DEFAULT VALUE
+      source_branch:
+        description: 'Branch yang akan di-clone'
+        required: false
+        default: 'main'
+      make_targets:
+        description: 'Target Makefile yang akan dijalankan (pisahkan dengan koma)'
+        required: false
+        default: 'setup tg5040 tg5050 special package'
 
 jobs:
-  setup:
-    runs-on: ubuntu-latest
-    outputs:
-      commit_hash: ${{ steps.clone.outputs.commit_hash }}
+  clone-and-build:
+    runs-on: ubuntu-24.04-arm
+    env:
+      SOURCE_REPO: ${{ github.event.inputs.source_repo }}
+      SOURCE_BRANCH: ${{ github.event.inputs.source_branch || 'main' }}
+      MAKE_TARGETS: ${{ github.event.inputs.make_targets }}
     
     steps:
-    - name: Checkout builder
-      uses: actions/checkout@v4
-      
-    - name: Clone MinUI
-      id: clone
-      run: |
-        git clone --depth 1 https://github.com/shauninman/MinUI.git minui-build
-        cd minui-build
-        echo "commit_hash=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
-        
-    - name: Apply patches
-      run: |
-        cd minui-build
-        
-        if [ -f "../patches/minui-ci.patch" ]; then
-          patch -p1 -i "../patches/minui-ci.patch" || echo "Patch applied"
-        fi
-        
-        if [ -f "../patches/apply-patch.sh" ]; then
-          chmod +x "../patches/apply-patch.sh"
-          "../patches/apply-patch.sh" || echo "Script done"
-        fi
-        
-    - name: Upload patched source
-      uses: actions/upload-artifact@v4
-      with:
-        name: minui-patched-source
-        path: minui-build/
-        retention-days: 1
+      - name: Checkout repository tujuan
+        uses: actions/checkout@v4.2.2
+        with:
+          fetch-depth: 1
 
-  build:
-    needs: setup
-    runs-on: ubuntu-latest
-    
-    steps:
-    - name: Download patched source
-      uses: actions/download-artifact@v4
-      with:
-        name: minui-patched-source
-        
-    - name: Install dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y \
-          build-essential \
-          libsdl2-dev \
-          libsdl2-image-dev \
-          libsdl2-ttf-dev \
-          libsdl2-mixer-dev
-        
-    - name: Build
-      run: |
-        cd minui-build
-        make TARGET=${{ github.event.inputs.target_device }} || make
-        
-        echo "Build outputs:"
-        find . -name "*.zip" -o -name "*.elf" -o -name "*.img" || echo "No outputs"
-        
-    - name: Upload build artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: minui-build-output
-        path: minui-build/*.zip
+      - name: Clone repository sumber eksternal
+        run: |
+          echo "🔍 Cloning repository: $SOURCE_REPO"
+          echo "🌿 Branch: $SOURCE_BRANCH"
+          
+          # Clone repository eksternal
+          git clone --depth 1 --branch "$SOURCE_BRANCH" "$SOURCE_REPO" external-repo
+          
+          echo "✅ Repository berhasil di-clone"
+          
+          # Simpan commit hash untuk tracking
+          cd external-repo
+          COMMIT_HASH=$(git rev-parse --short HEAD)
+          echo "COMMIT_HASH=$COMMIT_HASH" >> $GITHUB_ENV
+          echo "🔖 Commit Hash: $COMMIT_HASH"
+          cd ..
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zipmerge make git build-essential
+
+      - name: Build dari repo eksternal
+        run: |
+          cd external-repo
+          
+          # Generate nama build otomatis
+          REPO_NAME=$(basename -s .git "$SOURCE_REPO")
+          BUILD_TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+          RELEASE_NAME="${REPO_NAME}-${BUILD_TIMESTAMP}-${COMMIT_HASH}"
+          echo "RELEASE_NAME=$RELEASE_NAME" >> $GITHUB_ENV
+          echo "🏷️ Release Name: $RELEASE_NAME"
+          
+          # Cek apakah Makefile ada
+          if [ ! -f "Makefile" ]; then
+            echo "❌ ERROR: Makefile tidak ditemukan di repository sumber"
+            exit 1
+          fi
+          
+          echo "📦 Makefile ditemukan, memulai build..."
+          echo "🎯 Targets: $MAKE_TARGETS"
+          
+          # Jalankan target Makefile
+          for target in $(echo $MAKE_TARGETS | tr ',' ' '); do
+            echo "🔨 Running: make $target"
+            make "$target" || {
+              echo "❌ make $target gagal"
+              exit 1
+            }
+            echo "✅ make $target berhasil"
+          done
+          
+          # Cari dan copy file hasil build
+          mkdir -p ../build-output
+          
+          # Cari file build di folder releases (jika ada)
+          if [ -d "releases" ]; then
+            echo "📁 Copy files from releases/"
+            cp -r releases/* ../build-output/ 2>/dev/null || true
+          fi
+          
+          # Juga cari file zip/bin di root
+          find . -maxdepth 2 -type f \( -name "*.zip" -o -name "*.tar.gz" -o -name "*.bin" \) \
+            -not -path "./.git/*" -exec cp {} ../build-output/ \; 2>/dev/null || true
+
+      - name: Upload hasil build ke artifacts
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: build-${{ env.RELEASE_NAME }}
+          path: build-output/
+          retention-days: 30
+
+      - name: Display build summary
+        run: |
+          echo "========================================"
+          echo "✅ BUILD SUMMARY"
+          echo "========================================"
+          echo "📦 Build Name: ${{ env.RELEASE_NAME }}"
+          echo "🔗 Source Repo: ${{ env.SOURCE_REPO }}"
+          echo "🌿 Branch: ${{ env.SOURCE_BRANCH }}"
+          echo "🔖 Commit: ${{ env.COMMIT_HASH }}"
+          echo "🎯 Make Targets: ${{ env.MAKE_TARGETS }}"
+          echo "📁 Artifacts: build-${{ env.RELEASE_NAME }}"
+          echo ""
+          echo "📂 Generated files:"
+          if [ -d "build-output" ] && [ "$(ls -A build-output)" ]; then
+            ls -la build-output/
+          else
+            echo "  ⚠️  No files generated (check if build produced output files)"
+          fi
+          echo "========================================"
