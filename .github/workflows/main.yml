@@ -201,9 +201,23 @@ jobs:
       - name: Generate cores matrix
         id: cores
         run: |
-          cd MinUI-source
-          CORES="$(make cores-json)"
+          cd nextui-source
+          # Cek apakah ini MinUI repository
+          if [[ "${{ github.event.inputs.source_repo }}" == *"MinUI"* ]] || [ ! -f "Makefile" ]; then
+            echo "⚠️ MinUI detected or no Makefile, using default cores"
+            # Default cores untuk platform umum
+            CORES='["gba", "nes", "snes", "gb", "gbc", "md", "psx"]'
+          else
+            # Coba gunakan cores-json jika ada
+            if make -n cores-json 2>/dev/null; then
+              CORES="$(make cores-json)"
+            else
+              echo "⚠️ cores-json target not found, using default"
+              CORES='["core1", "core2", "core3"]'
+            fi
+          fi
           echo "cores=$CORES" >> $GITHUB_OUTPUT
+          echo "Generated cores: $CORES"
 
   build-core:
     needs: core-matrix
