@@ -203,7 +203,7 @@ jobs:
         run: |
           cd nextui-source
           # Cek apakah ini MinUI repository
-          if [[ "${{ github.event.inputs.source_repo }}" == *"MinUI"* ]] || [ ! -f "Makefile" ]; then
+          if [[ "${{ github.event.inputs.source_repo }}" == *"MinUI"* ]] || [ ! -f "makefile" ]; then
             echo "⚠️ MinUI detected or no Makefile, using default cores"
             # Default cores untuk platform umum
             CORES='["gba", "nes", "snes", "gb", "gbc", "md", "psx"]'
